@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: 2010-09-09
 
-Description: 'Local Measure Amazon Connect. Canonical URL: https://localmeasure-connect.s3.amazonaws.com/localmeasure-connect-v5.8.18.yaml'
+Description: 'Local Measure Amazon Connect. Canonical URL: https://localmeasure-connect.s3.amazonaws.com/localmeasure-connect-v5.9.1.yaml'
 
 Metadata:
   'AWS::CloudFormation::Interface':
@@ -24,6 +24,7 @@ Metadata:
           - UserPoolId
           - AppClientId
           - IdentityPoolId
+          - LMWorkspace
       - Label:
           default: Email channel for Amazon Connect, using Simple Email Service (SES)
         Parameters:
@@ -60,10 +61,10 @@ Parameters:
       - 'us-east-1'
       - 'ap-southeast-2'
       - 'eu-west-2'
-    Description: Input the preferable region that Local Measure hosts at
+    Description: Select region where Local Measure is hosted
   STSExternalId:
     Type: String
-    Description: Input the external ID provided by Local Measure
+    Description: Enter external ID provided by Local Measure
   EnableCognito:
     Type: String
     AllowedValues:
@@ -80,10 +81,10 @@ Parameters:
     Type: String
     Description: >
       Enter the existing user pool client ID (e.g. 1h57kf5cpq17m0eml12EXAMPLE) if you choose not to provision Cognito
-  IdentityPoolId:
+  LMWorkspace:
     Type: String
-    Description: >
-      Enter the existing identity pool ID (e.g. us-east-1:0d01f4d7-1305-4408-b437-12345EXAMPLE) if you choose not to provision Cognito
+    Description: Enter your Local Measure workspace name, e.g. support-01
+    AllowedPattern: ^[-a-zA-Z0-9]*$
   EnableEmail:
     Type: String
     AllowedValues:
@@ -126,14 +127,17 @@ Conditions:
 Mappings:
   RegionMap:
     'us-east-1':
-      'LMAccount': '944034703589'
-      'LMOrigin': 'engage.va.localmeasure.com'
+      'LMAccount': '868959814947'
+      'EngageOrigin': 'engage.us.localmeasure.com'
+      'AppOrigin': 'app.us.localmeasure.com'
     'ap-southeast-2':
       'LMAccount': '019030449779'
-      'LMOrigin': 'engage.syd.localmeasure.com'
+      'EngageOrigin': 'engage.syd.localmeasure.com'
+      'AppOrigin': 'app.syd.localmeasure.com'
     'eu-west-2':
       'LMAccount': '994561649143'
-      'LMOrigin': 'engage.uk.localmeasure.com'
+      'EngageOrigin': 'engage.uk.localmeasure.com'
+      'AppOrigin': 'app.uk.localmeasure.com'
 
 Resources:
   LambdaZipsBucket:
@@ -146,11 +150,11 @@ Resources:
       SourceBucket: localmeasure-connect
       Prefix: ''
       Objects:
-        - 202107/signed-48c56b47-1076-49e1-9c9b-ec00f8b7b1bc.zip
-        - 202107/signed-fe767754-4c1e-4cd5-b58c-923ccb9e9f85.zip
-        - 202107/signed-9a7fb70d-6a1f-4daa-a25d-492d5b776098.zip
-        - 202107/signed-a58e4bfb-cb94-4383-af61-0a9a664ae6da.zip
-        - 202107/signed-a18ae27e-e4c2-4a7f-8105-692861e7b848.zip
+        - 202108/signed-36f7f07d-cb97-4d47-b367-84ea10663f71.zip
+        - 202108/signed-f7402c62-a7d5-4bfe-87b2-bb827db25341.zip
+        - 202108/signed-26a5c559-26a6-45d1-8967-736aaa014e55.zip
+        - 202108/signed-1a28032e-28eb-40bb-a022-bbb54c435fa7.zip
+        - 202108/signed-68582711-e7cd-46fe-aadf-52c584c6e3b8.zip
   CopyZipsRole:
     Type: 'AWS::IAM::Role'
     Properties:
@@ -242,7 +246,6 @@ Resources:
                   cfnresponse.send(event, context, status, {}, None)
   CopyZipsLogGroup:
     Type: 'AWS::Logs::LogGroup'
-    DependsOn: 'CopyZips'
     Properties:
       LogGroupName: !Sub '/aws/lambda/${CopyZips}'
       RetentionInDays: 14
@@ -293,7 +296,7 @@ Resources:
     Properties:
       Code:
         S3Bucket: !Ref 'LambdaZipsBucket'
-        S3Key: 202107/signed-48c56b47-1076-49e1-9c9b-ec00f8b7b1bc.zip
+        S3Key: 202108/signed-36f7f07d-cb97-4d47-b367-84ea10663f71.zip
       Handler: lambda_function.lambda_handler
       Role: !GetAtt 'LMFunctionRole.Arn'
       Runtime: python3.7
@@ -311,7 +314,6 @@ Resources:
           LM_REGION: !Ref 'LMRegion'
   LMFunctionLogGroup:
     Type: 'AWS::Logs::LogGroup'
-    DependsOn: 'LMFunction'
     Properties:
       LogGroupName: !Sub '/aws/lambda/${LMFunction}'
       RetentionInDays: 14
@@ -355,20 +357,13 @@ Resources:
       Role: !GetAtt 'SubscribeTranscriptBucketRole.Arn'
       Code:
         ZipFile: |
-            from __future__ import print_function
             import json
             import boto3
             import cfnresponse
-
-            SUCCESS = "SUCCESS"
-            FAILED = "FAILED"
-
-            print('Loading function')
             s3 = boto3.resource('s3')
-
             def lambda_handler(event, context):
                 print("Received event: " + json.dumps(event, indent=2))
-                responseData={}
+                response_status = 'SUCCESS'
                 try:
                     if event['RequestType'] == 'Delete':
                         print("Request Type:",event['RequestType'])
@@ -380,14 +375,10 @@ Resources:
                         LambdaArn=event['ResourceProperties']['LambdaArn']
                         Bucket=event['ResourceProperties']['Bucket']
                         add_notification(LambdaArn, Bucket)
-                        responseData={'Bucket':Bucket}
-                        print("Sending response to custom resource")
-                    responseStatus = 'SUCCESS'
                 except Exception as e:
                     print('Failed to process:', e)
-                    responseStatus = 'FAILURE'
-                    responseData = {'Failure': 'Something bad happened.'}
-                cfnresponse.send(event, context, responseStatus, responseData)
+                    response_status = 'FAILED'
+                cfnresponse.send(event, context, response_status, {})
 
             def add_notification(LambdaArn, Bucket):
                 bucket_notification = s3.BucketNotification(Bucket)
@@ -415,7 +406,6 @@ Resources:
       Timeout: 50
   SubscribeTranscriptBucketLogGroup:
     Type: 'AWS::Logs::LogGroup'
-    DependsOn: 'SubscribeTranscriptBucket'
     Properties:
       LogGroupName: !Sub '/aws/lambda/${SubscribeTranscriptBucket}'
       RetentionInDays: 14
@@ -449,7 +439,7 @@ Resources:
               - 'sts:AssumeRole'
             Condition:
               StringEquals:
-                sts:ExternalId: !Select [2, !Split ['/', !Ref AWS::StackId]]
+                sts:ExternalId: !Select [2, !Split ['/', !Ref 'AWS::StackId']]
       Policies:
         - PolicyName: LMDefaultPolicies
           PolicyDocument:
@@ -457,42 +447,24 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - connect:ListPhoneNumbers
-                  - connect:DescribeInstance
-                  - connect:DescribeUserHierarchyStructure
                   - connect:ListQueues
-                  - connect:ListUsers
-                  - connect:ListRoutingProfiles
-                  - connect:ListSecurityProfiles
-                  - connect:ListContactFlows
-                  - connect:ListUserHierarchyGroups
-                  - connect:GetFederationToken
-                  - connect:ListHoursOfOperation
-                Resource: !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}/*'
+                Resource: !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}/queue/*'
               - Effect: Allow
                 Action:
                   - connect:ResumeContactRecording
                   - connect:SuspendContactRecording
-                  - connect:ListTagsForResource
-                  - connect:GetMetricData
                   - connect:GetContactAttributes
-                  - connect:DescribeUser
-                  - connect:StartChatContact
-                  - connect:GetCurrentMetricData
                   - connect:StopContact
-                  - connect:StartTaskContact
-                  - connect:DescribeUserHierarchyGroup
                   - connect:UpdateContactAttributes
                 Resource:
-                  - !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}/agent/*'
-                  - !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}/queue/*'
                   - !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}/contact/*'
-                  - !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}/agent-group/*'
-                  - !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}/contact-flow/*'
               - Effect: Allow
                 Action:
-                  - 's3:ListBucket'
-                Resource: !Sub 'arn:aws:s3:::${TranscriptBucket}'
+                  - connect:StartChatContact
+                  - connect:StartTaskContact
+                  - connect:ListContactFlows
+                Resource:
+                  - !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}/contact-flow/*'
               - Effect: Allow
                 Action:
                   - 's3:GetObject'
@@ -570,7 +542,6 @@ Resources:
       Timeout: 50
   SignCodeLogGroup:
     Type: 'AWS::Logs::LogGroup'
-    DependsOn: 'SignCode'
     Properties:
       LogGroupName: !Sub '/aws/lambda/${SignCode}'
       RetentionInDays: 14
@@ -588,24 +559,24 @@ Resources:
     Condition: CreateCognitoResources
     DependsOn: RunCopyZips
     Properties:
-      TemplateURL: https://localmeasure-connect.s3.amazonaws.com/localmeasure-connect-v5.8.18-cognito.yaml
+      TemplateURL: https://localmeasure-connect.s3.amazonaws.com/localmeasure-connect-v5.9.1-cognito.yaml
       TimeoutInMinutes: '10'
       Parameters:
         TranscriptBucket: !Ref 'TranscriptBucket'
         LambdaZipsBucket: !Ref 'LambdaZipsBucket'
-        EnableCognito: !Ref EnableCognito
-        UserPoolId: !Ref UserPoolId
-        AppClientId: !Ref AppClientId
-        IdentityPoolId: !Ref IdentityPoolId
-        ConnectInstanceId: !Ref ConnectInstanceId
-        CustomerProfilesDomain: !Ref CustomerProfilesDomain
-        LMOrigin: !FindInMap [RegionMap, !Ref 'LMRegion', LMOrigin]
+        EnableCognito: !Ref 'EnableCognito'
+        UserPoolId: !Ref 'UserPoolId'
+        AppClientId: !Ref 'AppClientId'
+        ConnectInstanceId: !Ref 'ConnectInstanceId'
+        CustomerProfilesDomain: !Ref 'CustomerProfilesDomain'
+        EngageOrigin: !FindInMap [RegionMap, !Ref 'LMRegion', EngageOrigin]
+        LMWorkspace: !Ref 'LMWorkspace'
   Email:
     Type: AWS::CloudFormation::Stack
     Condition: CreateEmailResources
     DependsOn: RunCopyZips
     Properties:
-      TemplateURL: https://localmeasure-connect.s3.amazonaws.com/localmeasure-connect-v5.8.18-email.yaml
+      TemplateURL: https://localmeasure-connect.s3.amazonaws.com/localmeasure-connect-v5.9.1-email.yaml
       TimeoutInMinutes: '10'
       Parameters:
         SESBucketName: !Ref 'SESBucketName'
@@ -618,6 +589,8 @@ Resources:
         LMRegion: !Ref 'LMRegion'
         LMRole: !Ref 'LMRole'
         LMRoleArn: !GetAtt 'LMRole.Arn'
+        LMFunctionRole: !Ref 'LMFunctionRole'
+        LMFunctionRoleArn: !GetAtt 'LMFunctionRole.Arn'
         SignCodeArn: !GetAtt 'SignCode.Arn'
         CSCArn: !GetAtt 'CSC.CodeSigningConfigArn'
   SMS:
@@ -625,7 +598,7 @@ Resources:
     Condition: CreateSMSResources
     DependsOn: RunCopyZips
     Properties:
-      TemplateURL: https://localmeasure-connect.s3.amazonaws.com/localmeasure-connect-v5.8.18-sms.yaml
+      TemplateURL: https://localmeasure-connect.s3.amazonaws.com/localmeasure-connect-v5.9.1-sms.yaml
       TimeoutInMinutes: '10'
       Parameters:
         SignCodeArn: !GetAtt 'SignCode.Arn'
@@ -633,8 +606,111 @@ Resources:
         LambdaZipsBucket: !Ref 'LambdaZipsBucket'
         LMAccountId: !FindInMap [RegionMap, !Ref 'LMRegion', LMAccount]
         LMRole: !Ref 'LMRole'
-
+  QuickSetupRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess'
+        - 'arn:aws:iam::aws:policy/AmazonConnectReadOnlyAccess'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: QuickSetupPolicies
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'apigateway:GET'
+                Resource:
+                  - !Sub 'arn:aws:apigateway:${AWS::Region}::/apis/*'
+  QuickSetup:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt 'QuickSetupRole.Arn'
+      Code:
+        ZipFile: |
+            import json
+            import urllib.parse
+            import cfnresponse
+            import boto3
+            cfn = boto3.client('cloudformation')
+            connect = boto3.client('connect')
+            def lambda_handler(event, context):
+                response_data={'QuickUrl': ''}
+                if event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+                    props = event['ResourceProperties'].copy()
+                    print(props)
+                    props.pop('ServiceToken')
+                    try:
+                        if props.get('SMS'):
+                            res = cfn.describe_stack_resource(StackName=props.get('SMS'), LogicalResourceId='LMOutboundSMS')
+                            props['pinpoint_proxy_func'] = res.get('StackResourceDetail', {}).get('PhysicalResourceId')
+                            props.pop('SMS')
+                        res = connect.describe_instance(InstanceId=props.get('instance_id'))
+                        props['instance_alias'] = res.get('Instance', {}).get('InstanceAlias')
+                        if props.get('Cognito'):
+                            res = cfn.describe_stack_resource(StackName=props.get('Cognito'), LogicalResourceId='RestAPI')
+                            id = res.get('StackResourceDetail', {}).get('PhysicalResourceId')
+                            props['api_gateway_url'] = f"https://{id}.execute-api.{props.get('aws_region')}.amazonaws.com/prod"
+                            if props.get('EnableCognito') == 'Yes':
+                                res = cfn.describe_stack_resource(StackName=props.get('Cognito'), LogicalResourceId='UserPool')
+                                props['cognito_iss_url'] = f"https://cognito-idp.{props.get('cognito_region')}.amazonaws.com/{res.get('StackResourceDetail', {}).get('PhysicalResourceId')}"
+                                res = cfn.describe_stack_resource(StackName=props.get('Cognito'), LogicalResourceId='AppClient')
+                                props['cognito_client_id'] = res.get('StackResourceDetail', {}).get('PhysicalResourceId')
+                            elif props.get('EnableCognito') == 'Exist':
+                                props['cognito_iss_url'] = f"https://cognito-idp.{props.get('cognito_region')}.amazonaws.com/{props.get('UserPoolId')}"
+                                props['cognito_client_id'] = props.get('AppClientId')
+                            props.pop('Cognito')
+                            props.pop('EnableCognito')
+                            props.pop('UserPoolId')
+                            props.pop('AppClientId')
+                    except Exception as e:
+                        print('Failed to process:', e)
+                    origin = props.get('AppOrigin', '')
+                    print(props)
+                    response_data['QuickUrl'] = f"https://{origin}/amazon_connect/settings/config?{urllib.parse.urlencode(props)}"
+                cfnresponse.send(event, context, 'SUCCESS', response_data)
+      Runtime: python3.7
+      Timeout: 50
+  QuickSetupLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${QuickSetup}'
+      RetentionInDays: 14
+  RunQuickSetup:
+    Type: 'Custom::LambdaTrigger'
+    Properties:
+      ServiceToken: !GetAtt 'QuickSetup.Arn'
+      instance_id: !Ref 'ConnectInstanceId'
+      aws_region: !Ref 'AWS::Region'
+      customer_profiles_domain: !Ref 'CustomerProfilesDomain'
+      mail_bucket: !Ref 'SESBucketName'
+      assumed_role_arn: !GetAtt 'LMRole.Arn'
+      trusted_role_arn: !GetAtt 'LMFunctionRole.Arn'
+      client_account_id: !Ref 'AWS::AccountId'
+      client_granted_external_id: !Select [2, !Split ['/', !Ref 'AWS::StackId']]
+      cognito_region: !Ref 'AWS::Region'
+      slug: !Ref 'LMWorkspace'
+      SMS: !If [CreateSMSResources, !Ref 'SMS', !Ref 'AWS::NoValue']
+      Cognito: !If [CreateCognitoResources, !Ref 'Cognito', !Ref 'AWS::NoValue']
+      EnableCognito: !Ref 'EnableCognito'
+      UserPoolId: !Ref 'UserPoolId'
+      AppClientId: !Ref 'AppClientId'
+      AppOrigin: !FindInMap [RegionMap, !Ref 'LMRegion', AppOrigin]
 Outputs:
+  QuickUrl:
+    Description: 'Quick setup in Local Measure'
+    Value: !GetAtt 'RunQuickSetup.QuickUrl'
   AssumedRoleARN:
     Description: 'Role ARN for Local Measure to assume'
     Value: !GetAtt 'LMRole.Arn'
@@ -643,4 +719,4 @@ Outputs:
     Value: !GetAtt 'LMFunctionRole.Arn'
   ExternalID:
     Description: 'External ID allocated for Local Measure only'
-    Value: !Select [2, !Split ['/', !Ref AWS::StackId]]
+    Value: !Select [2, !Split ['/', !Ref 'AWS::StackId']]
