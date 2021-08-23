@@ -1,0 +1,284 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  EnableCognito:
+    Type: String
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+      - 'Exist'
+  TranscriptBucket:
+    Type: String
+  LambdaZipsBucket:
+    Type: String
+  UserPoolId:
+    Type: String
+  AppClientId:
+    Type: String
+  IdentityPoolId:
+    Type: String
+  ConnectInstanceId:
+    Type: String
+  CustomerProfilesDomain:
+    Type: String
+  LMOrigin:
+    Type: String
+
+Conditions:
+  CreateCognitoResources: !Equals [ !Ref EnableCognito, 'Yes' ]
+
+Resources:
+  ConnectAPI:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Description: Connect HTTP API
+      Name: !Select [2, !Split ["/", !Ref AWS::StackId]]
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowCredentials: true
+        AllowHeaders:
+          - accept
+          - accept-language
+          - content-language
+          - content-type
+          - authorization
+        AllowMethods:
+          - '*'
+        AllowOrigins:
+          - https://engage.getlocalmeasure.com
+          - https://engage.syd.localmeasure.com
+          - https://engage.uk.localmeasure.com
+        MaxAge: 86400
+  HandlerLambdaIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    DependsOn: 'MainHandler'
+    Properties:
+      ApiId: !Ref ConnectAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub
+      - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FN_ARN}/invocations'
+      - { FN_ARN: !GetAtt 'MainHandler.Arn' }
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+  DefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref ConnectAPI
+      StageName: '$default'
+      AutoDeploy: true
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ConnectAPI
+      RouteKey: '$default'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JWTAuthorizer
+      Target: !Sub 'integrations/${HandlerLambdaIntegration}'
+  PreflightRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ConnectAPI
+      RouteKey: 'OPTIONS /{proxy+}'
+      Target: !Sub 'integrations/${HandlerLambdaIntegration}'
+  JWTAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref ConnectAPI
+      AuthorizerType: JWT
+      IdentitySource:
+        - '$request.header.authorization'
+      JwtConfiguration:
+        Audience:
+        - !If [CreateCognitoResources, !Ref AppClient, !Ref AppClientId]
+        Issuer: !Sub
+          - 'https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}'
+          - { 'UserPool': !If [CreateCognitoResources, !Ref UserPool, !Ref UserPoolId] }
+      Name: jwt-authorizer
+  MainHandler:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref 'LambdaZipsBucket'
+        S3Key: 202107/signed-fe767754-4c1e-4cd5-b58c-923ccb9e9f85.zip
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt 'MainHandlerRole.Arn'
+      Runtime: python3.7
+      Environment:
+        Variables:
+          TRANSCRIPT_BUCKET: !Ref 'TranscriptBucket'
+          IDENTITY_POOL_ID: !If [CreateCognitoResources, !Ref IDPool, !Ref IdentityPoolId]
+          TBL_SESSION: !Ref SessionTable
+  MainHandlerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: HandlerPolicies
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                Resource: !GetAtt 'SessionTable.Arn'
+  DefaultRouteLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MainHandler
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ConnectAPI}/*/$default'
+  PreflightRouteLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MainHandler
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ConnectAPI}/*/*/{proxy+}'
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      AutoVerifiedAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+  AppClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - email
+        - openid
+      AllowedOAuthFlowsUserPoolClient: true
+      ClientName: app-client
+      CallbackURLs:
+        - !Sub 'https://${LMOrigin}/auth_redirect'
+      LogoutURLs:
+        - !Sub 'https://${LMOrigin}'
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+      UserPoolId: !If [CreateCognitoResources, !Ref UserPool, !Ref UserPoolId]
+      SupportedIdentityProviders:
+        - COGNITO
+  IDPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        - ClientId: !If [CreateCognitoResources, !Ref AppClient, !Ref AppClientId]
+          ProviderName: !Sub
+            - 'cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}'
+            - { 'UserPool': !If [CreateCognitoResources, !Ref UserPool, !Ref UserPoolId] }
+  IDPoolUnauthenticated:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: 'sts:AssumeRoleWithWebIdentity'
+          Principal:
+            Federated: cognito-identity.amazonaws.com
+          Condition:
+            StringEquals:
+              'cognito-identity.amazonaws.com:aud': !If [CreateCognitoResources, !Ref IDPool, !Ref IdentityPoolId]
+            ForAnyValue:StringLike:
+              'cognito-identity.amazonaws.com:amr': unauthenticated
+  IDPoolAuthenticated:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: 'sts:AssumeRoleWithWebIdentity'
+          Principal:
+            Federated: cognito-identity.amazonaws.com
+          Condition:
+            StringEquals:
+              'cognito-identity.amazonaws.com:aud': !If [CreateCognitoResources, !Ref IDPool, !Ref IdentityPoolId]
+            ForAnyValue:StringLike:
+              'cognito-identity.amazonaws.com:amr': authenticated
+      Policies:
+        - PolicyName: ConnectPolicies
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - connect:ListQueues
+                Resource:
+                  - !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}'
+              - Effect: Allow
+                Action:
+                  - connect:StartTaskContact
+                  - connect:UpdateContactAttributes
+                  - connect:GetContactAttributes
+                  - connect:SuspendContactRecording
+                  - connect:ResumeContactRecording
+                Resource:
+                  - !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}/contact/*'
+                  - !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}/contact-flow/*'
+              - Effect: Allow
+                Action:
+                  - profile:CreateProfile
+                  - profile:DeleteProfile
+                  - profile:SearchProfiles
+                  - profile:UpdateProfile
+                Resource: !Sub 'arn:aws:profile:${AWS::Region}:${AWS::AccountId}:domains/${CustomerProfilesDomain}'
+              - Effect: Allow
+                Action:
+                  - profile:ListProfileObjects
+                  - profile:DeleteProfileObject
+                  - profile:PutProfileObject
+                  - profile:AddProfileKey
+                  - profile:DeleteProfileKey
+                Resource:
+                  - !Sub 'arn:aws:profile:${AWS::Region}:${AWS::AccountId}:domains/${CustomerProfilesDomain}'
+                  - !Sub 'arn:aws:profile:${AWS::Region}:${AWS::AccountId}:domains/${CustomerProfilesDomain}/object-types/*'
+              - Effect: Allow
+                Action:
+                  - 's3:ListBucket'
+                Resource: !Sub 'arn:aws:s3:::${TranscriptBucket}'
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                Resource: !Sub 'arn:aws:s3:::${TranscriptBucket}/*'
+  RoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Condition: CreateCognitoResources
+    Properties:
+      IdentityPoolId: !Ref IDPool
+      Roles:
+        unauthenticated: !GetAtt 'IDPoolUnauthenticated.Arn'
+        authenticated: !GetAtt 'IDPoolAuthenticated.Arn'
+  SessionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: Subject
+          AttributeType: 'S'
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: Subject
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ExpiredTimestamp
+        Enabled: true
